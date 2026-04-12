@@ -1,0 +1,20 @@
+# name: test/sql/sketch2.test
+# description: test sketch2 extension
+# group: [sql]
+
+# Before we load the extension, this will fail
+statement error
+SELECT sketch2('Sam');
+----
+Catalog Error: Scalar Function with name sketch2 does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require sketch2
+
+# Confirm the extension works
+query T
+SELECT sketch2('');
+----
+Sketch2 0.1.0
+
+
