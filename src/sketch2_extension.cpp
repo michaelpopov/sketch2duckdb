@@ -2,6 +2,7 @@
 
 #include "sketch2_bitset_filter.hpp"
 #include "sketch2_extension.hpp"
+#include "sketch2_knn.hpp"
 #include "sketch2_open.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
@@ -44,6 +45,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto sketch2_scalar_function = ScalarFunction("sketch2", {LogicalType::VARCHAR}, LogicalType::VARCHAR, Sketch2ScalarFun);
 	loader.RegisterFunction(sketch2_scalar_function);
 	RegisterSketch2BitsetFilterFunction(loader);
+	RegisterSketch2KnnFunction(loader);
 	RegisterSketch2OpenFunction(loader);
 }
 

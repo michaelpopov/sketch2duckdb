@@ -8,3 +8,7 @@ test/python/__pycache__/
 .Rhistory
 .vscode/
 .cache/
+.pytest-venv/
+.codex
+test/generated/
+tmp-empty-review-db/

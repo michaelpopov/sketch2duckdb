@@ -38,9 +38,40 @@ SELECT bitset_filter(-1::BIGINT);
 ----
 
 statement error
+SELECT * FROM sketch2_knn(NULL, 1, NULL);
+----
+
+statement error
+SELECT * FROM sketch2_knn('1.0, 1.0, 1.0, 1.0', 0, NULL);
+----
+
+statement error
+SELECT * FROM sketch2_knn('1.0, 1.0, 1.0, 1.0', 1, 0);
+----
+
+statement error
+SELECT * FROM sketch2_knn('1.0, 1.0, 1.0, 1.0', 1, NULL);
+----
+<REGEX>:.*sketch2_knn requires sketch2_open\(database_path, dataset_name\) to be called first.*
+
+statement error
 CALL sketch2_open('/tmp/db');
 ----
 
 statement error
 CALL sketch2_open(NULL, 'demo');
 ----
+
+statement ok
+CALL sketch2_open('test/generated/sketch2_sql_fixture', 'items');
+
+query TT
+SELECT id, score > 0
+FROM sketch2_knn(
+    '1.0, 1.0, 1.0, 1.0',
+    2,
+    NULL
+) ORDER BY score DESC, id DESC;
+----
+30	true
+20	true

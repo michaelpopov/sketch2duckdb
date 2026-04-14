@@ -34,6 +34,7 @@ set(EXTENSION_SOURCES
   src/sketch2_bitset_filter.cpp
   src/sketch2_extension.cpp
   src/sketch2_dataset.cpp
+  src/sketch2_knn.cpp
   src/sketch2_open.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

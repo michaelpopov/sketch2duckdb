@@ -9,3 +9,19 @@ or
 ```bash
 make test_debug
 ```
+
+Those test targets generate any SQL fixture datasets under `test/generated/`
+before running the sqllogictests.
+
+For Python integration tests under `test/python`, first install the repo's
+Python test dependencies:
+
+```bash
+make python-test-deps
+```
+
+Then run:
+
+```bash
+make pytest
+```

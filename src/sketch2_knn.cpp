@@ -1,0 +1,169 @@
+#include "sketch2_knn.hpp"
+
+#include "duckdb.hpp"
+#include "duckdb/common/exception/binder_exception.hpp"
+#include "duckdb/function/table_function.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
+
+#include "sketch2_dataset.hpp"
+
+#include <limits>
+
+namespace duckdb {
+
+struct Sketch2KnnBindData : public FunctionData {
+	Sketch2KnnBindData(string query_vector_p, uint32_t k_p, bool has_bitset_filter_p, int64_t bitset_filter_handle_p)
+	    : query_vector(std::move(query_vector_p)), k(k_p), has_bitset_filter(has_bitset_filter_p),
+	      bitset_filter_handle(bitset_filter_handle_p) {
+	}
+
+	string query_vector;
+	uint32_t k;
+	bool has_bitset_filter;
+	int64_t bitset_filter_handle;
+
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<Sketch2KnnBindData>(query_vector, k, has_bitset_filter, bitset_filter_handle);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		auto &other = other_p.Cast<Sketch2KnnBindData>();
+		return query_vector == other.query_vector && k == other.k && has_bitset_filter == other.has_bitset_filter &&
+		       bitset_filter_handle == other.bitset_filter_handle;
+	}
+};
+
+struct Sketch2KnnGlobalState : public GlobalTableFunctionState {
+	vector<uint64_t> ids;
+	vector<double> scores;
+	idx_t offset = 0;
+};
+
+static unique_ptr<FunctionData> Sketch2KnnBind(ClientContext &, TableFunctionBindInput &input,
+                                               vector<LogicalType> &return_types, vector<string> &names) {
+	if (input.inputs.size() != 3) {
+		throw BinderException("sketch2_knn(query_vector, k, bitset_filter_ref) expects exactly 3 arguments");
+	}
+	if (input.inputs[0].IsNull()) {
+		throw BinderException("sketch2_knn query_vector must not be NULL");
+	}
+	if (input.inputs[1].IsNull()) {
+		throw BinderException("sketch2_knn k must not be NULL");
+	}
+
+	auto query_vector = StringValue::Get(input.inputs[0]);
+	if (query_vector.empty()) {
+		throw BinderException("sketch2_knn query_vector must be a non-empty string");
+	}
+
+	const auto k_value = input.inputs[1].GetValue<int64_t>();
+	if (k_value <= 0) {
+		throw BinderException("sketch2_knn k must be > 0");
+	}
+	if (k_value > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+		throw BinderException("sketch2_knn k is too large");
+	}
+
+	bool has_bitset_filter = false;
+	int64_t bitset_filter_handle = 0;
+	if (!input.inputs[2].IsNull()) {
+		bitset_filter_handle = input.inputs[2].GetValue<int64_t>();
+		if (bitset_filter_handle <= 0) {
+			throw BinderException("sketch2_knn bitset_filter_ref must be > 0 when provided");
+		}
+		has_bitset_filter = true;
+	}
+
+	names.emplace_back("id");
+	return_types.emplace_back(LogicalType::UBIGINT);
+	names.emplace_back("score");
+	return_types.emplace_back(LogicalType::DOUBLE);
+
+	return make_uniq<Sketch2KnnBindData>(std::move(query_vector), static_cast<uint32_t>(k_value), has_bitset_filter,
+	                                     bitset_filter_handle);
+}
+
+static unique_ptr<NodeStatistics> Sketch2KnnCardinality(ClientContext &, const FunctionData *bind_data_p) {
+	auto &bind_data = bind_data_p->Cast<Sketch2KnnBindData>();
+	// The lower bound stays at 0 because an empty dataset or an optional bitset
+	// filter can legitimately eliminate every row, even when k > 0.
+	return make_uniq<NodeStatistics>(0, bind_data.k);
+}
+
+static unique_ptr<GlobalTableFunctionState> Sketch2KnnInit(ClientContext &context, TableFunctionInitInput &input) {
+	auto &bind_data = input.bind_data->Cast<Sketch2KnnBindData>();
+	auto &dataset = *GetSketch2Dataset(context);
+	if (!dataset.handle) {
+		throw InvalidInputException("sketch2_knn requires sketch2_open(database_path, dataset_name) to be called first");
+	}
+
+	const void *bitset_blob = nullptr;
+	size_t bitset_blob_size = 0;
+	if (bind_data.has_bitset_filter) {
+		auto bitset = GetSketch2Bitset(context, bind_data.bitset_filter_handle);
+		if (!bitset) {
+			throw InvalidInputException("sketch2_knn bitset_filter_ref %lld was not found",
+			                            static_cast<long long>(bind_data.bitset_filter_handle));
+		}
+		bitset_blob = bitset->blob;
+		bitset_blob_size = bitset->blob_size;
+	}
+
+	uint64_t *ids = nullptr;
+	double *scores = nullptr;
+	size_t count = 0;
+	const int ret = sk_knn_items(dataset.handle, bind_data.query_vector.c_str(), bind_data.k, bitset_blob,
+	                             bitset_blob_size, &ids, &scores, &count);
+	if (ret != 0) {
+		const auto *message_ptr = sk_error_message(dataset.handle);
+		const auto message = string(message_ptr ? message_ptr : "unknown error");
+		// ids/scores start as nullptr, and sk_free delegates to std::free(),
+		// so cleanup remains safe even when the C API fails before assigning.
+		sk_free(ids);
+		sk_free(scores);
+		throw InvalidInputException("sketch2_knn failed: %s", message);
+	}
+	if (count > bind_data.k) {
+		sk_free(ids);
+		sk_free(scores);
+		throw InvalidInputException("sketch2_knn failed: returned %llu rows for k=%u",
+		                            static_cast<unsigned long long>(count), static_cast<unsigned int>(bind_data.k));
+	}
+
+	auto result = make_uniq<Sketch2KnnGlobalState>();
+	if (count > 0) {
+		result->ids.assign(ids, ids + count);
+		result->scores.assign(scores, scores + count);
+	}
+	sk_free(ids);
+	sk_free(scores);
+	return std::move(result);
+}
+
+static void Sketch2KnnFunction(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
+	auto &state = data_p.global_state->Cast<Sketch2KnnGlobalState>();
+	if (state.offset >= state.ids.size()) {
+		return;
+	}
+
+	const auto count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, state.ids.size() - state.offset);
+	auto ids_data = FlatVector::GetData<uint64_t>(output.data[0]);
+	auto scores_data = FlatVector::GetData<double>(output.data[1]);
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		const auto source_idx = state.offset + row_idx;
+		ids_data[row_idx] = state.ids[source_idx];
+		scores_data[row_idx] = state.scores[source_idx];
+	}
+	output.SetCardinality(count);
+	state.offset += count;
+}
+
+void RegisterSketch2KnnFunction(ExtensionLoader &loader) {
+	TableFunction sketch2_knn_function("sketch2_knn",
+	                                   {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT},
+	                                   Sketch2KnnFunction, Sketch2KnnBind, Sketch2KnnInit);
+	sketch2_knn_function.cardinality = Sketch2KnnCardinality;
+	loader.RegisterFunction(sketch2_knn_function);
+}
+
+} // namespace duckdb
