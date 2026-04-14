@@ -15,6 +15,32 @@ require sketch2
 query T
 SELECT sketch2('');
 ----
-Sketch2 0.1.0
+0.1.0
 
+statement error
+CALL sketch2_open('/tmp/db', 'demo');
+----
 
+query I
+SELECT bitset_filter(id) > 0
+FROM (SELECT 1::BIGINT AS id UNION ALL SELECT 3::BIGINT UNION ALL SELECT 9::BIGINT) t;
+----
+true
+
+query I
+SELECT bitset_filter(id) > 0
+FROM (SELECT * FROM range(0)) t(id);
+----
+true
+
+statement error
+SELECT bitset_filter(-1::BIGINT);
+----
+
+statement error
+CALL sketch2_open('/tmp/db');
+----
+
+statement error
+CALL sketch2_open(NULL, 'demo');
+----

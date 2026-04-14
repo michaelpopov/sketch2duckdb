@@ -30,7 +30,11 @@ if(NOT SKETCH2_LIBRARY)
   message(FATAL_ERROR "Could not find libsketch2 in ${SKETCH2_ROOT}/install/lib")
 endif()
 
-set(EXTENSION_SOURCES src/sketch2_extension.cpp)
+set(EXTENSION_SOURCES
+  src/sketch2_bitset_filter.cpp
+  src/sketch2_extension.cpp
+  src/sketch2_dataset.cpp
+  src/sketch2_open.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
