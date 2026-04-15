@@ -165,6 +165,43 @@ def test_duckdb_knn_basic_query(tmp_path, duckdb_con):
     assert_knn_rows_equal(actual, expected)
 
 
+def test_duckdb_knn_float_array_query(tmp_path, duckdb_con):
+    dataset_root = tmp_path / "db"
+    dataset_root.mkdir()
+    dataset_name = "items"
+    create_sequential_dataset(dataset_root, dataset_name)
+
+    duckdb_con.execute("SELECT * FROM sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    query_value = 7.4
+    k = 5
+    actual = duckdb_con.execute(
+        "SELECT id, score FROM sketch2_knn(?, ?, NULL) ORDER BY score, id",
+        [[query_value] * DIM, k],
+    ).fetchall()
+    expected = expected_knn_rows(query_value, k)
+    assert_knn_rows_equal(actual, expected)
+
+
+def test_duckdb_knn_float_array_query_with_allowed_ids(tmp_path, duckdb_con):
+    dataset_root = tmp_path / "db"
+    dataset_root.mkdir()
+    dataset_name = "items"
+    create_sequential_dataset(dataset_root, dataset_name)
+
+    duckdb_con.execute("SELECT * FROM sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    load_metadata_table(duckdb_con, tmp_path)
+    query_value = 7.4
+    k = 6
+    allowed_ids = {item_id for item_id in range(START_ID, START_ID + COUNT) if item_id % 2 == 1}
+    filter_ref = bitset_filter_ref_for_predicate(duckdb_con, "aaa = 1")
+    actual = duckdb_con.execute(
+        "SELECT id, score FROM sketch2_knn(?, ?, ?) ORDER BY score, id",
+        [[query_value] * DIM, k, filter_ref],
+    ).fetchall()
+    expected = expected_knn_rows(query_value, k, allowed_ids=allowed_ids)
+    assert_knn_rows_equal(actual, expected)
+
+
 def test_duckdb_knn_empty_dataset_returns_no_rows(tmp_path, duckdb_con):
     dataset_root = tmp_path / "db"
     dataset_root.mkdir()

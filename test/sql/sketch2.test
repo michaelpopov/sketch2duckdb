@@ -75,3 +75,14 @@ FROM sketch2_knn(
 ----
 30	true
 20	true
+
+query TT
+SELECT id, score > 0
+FROM sketch2_knn(
+    [1.0, 1.0, 1.0, 1.0]::FLOAT[],
+    2,
+    NULL
+) ORDER BY score DESC, id DESC;
+----
+30	true
+20	true
