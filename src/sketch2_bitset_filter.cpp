@@ -39,7 +39,7 @@ struct BitsetFilterOperation {
 	template <class STATE>
 	static void EnsureCapacityFor(STATE &state, idx_t additional_ids) {
 		if (state.ids.size() + additional_ids > SKETCH2_BITSET_FILTER_MAX_IDS) {
-			throw InvalidInputException("bitset_filter: too many ids, maximum supported count is %llu",
+			throw InvalidInputException("sketch2_bitset_filter: too many ids, maximum supported count is %llu",
 			                            static_cast<unsigned long long>(SKETCH2_BITSET_FILTER_MAX_IDS));
 		}
 	}
@@ -52,7 +52,7 @@ struct BitsetFilterOperation {
 	template <class INPUT_TYPE, class STATE, class OP>
 	static void Operation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &) {
 		if (input < 0) {
-			throw InvalidInputException("bitset_filter: id must be non-negative");
+			throw InvalidInputException("sketch2_bitset_filter: id must be non-negative");
 		}
 		EnsureCapacityFor(state, 1);
 		state.ids.push_back(static_cast<uint64_t>(input));
@@ -84,9 +84,9 @@ struct BitsetFilterOperation {
 
 		if (sk_bitset_build(ids, state.ids.size(), &blob, &blob_size, &out_of_memory, &error_message) != 0) {
 			if (out_of_memory) {
-				throw OutOfMemoryException("bitset_filter: out of memory");
+				throw OutOfMemoryException("sketch2_bitset_filter: out of memory");
 			}
-			throw InvalidInputException("bitset_filter: %s",
+			throw InvalidInputException("sketch2_bitset_filter: %s",
 			                            error_message ? error_message : "failed to build bitset");
 		}
 
@@ -116,7 +116,7 @@ void RegisterSketch2BitsetFilterFunction(ExtensionLoader &loader) {
 	                                                            BitsetFilterOperation,
 	                                                            AggregateDestructorType::LEGACY>(
 	    LogicalType::BIGINT, LogicalType::BIGINT);
-	function.name = "bitset_filter";
+	function.name = "sketch2_bitset_filter";
 	function.SetBindCallback(BindBitsetFilter);
 	loader.RegisterFunction(function);
 }

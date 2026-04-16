@@ -22,19 +22,19 @@ CALL sketch2_open('/tmp/db', 'demo');
 ----
 
 query I
-SELECT bitset_filter(id) > 0
+SELECT sketch2_bitset_filter(id) > 0
 FROM (SELECT 1::BIGINT AS id UNION ALL SELECT 3::BIGINT UNION ALL SELECT 9::BIGINT) t;
 ----
 true
 
 query I
-SELECT bitset_filter(id) > 0
+SELECT sketch2_bitset_filter(id) > 0
 FROM (SELECT * FROM range(0)) t(id);
 ----
 true
 
 statement error
-SELECT bitset_filter(-1::BIGINT);
+SELECT sketch2_bitset_filter(-1::BIGINT);
 ----
 
 statement error
