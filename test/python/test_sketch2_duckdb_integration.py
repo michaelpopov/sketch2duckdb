@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 
 from sketch2_test_utils import (
@@ -16,6 +17,7 @@ from sketch2_test_utils import (
 DIM = 4
 COUNT = 20
 START_ID = 0
+FILTER_COUNTER = itertools.count()
 
 def query_vector(query_value: float) -> str:
     return fmt_f32_vector([query_value] * DIM)
@@ -57,13 +59,19 @@ def load_metadata_table(con, root: Path, *, count: int = COUNT, start_id: int = 
     load_metadata_csv_into_table(con, metadata_csv_path)
 
 
-def bitset_filter_ref_for_predicate(con, predicate_sql: str) -> int:
+def next_filter_name(prefix: str = "duckdb_filter") -> str:
+    return f"{prefix}_{next(FILTER_COUNTER)}"
+
+
+def bitset_filter_name_for_predicate(con, predicate_sql: str, *, name: str | None = None) -> str:
+    filter_name = name or next_filter_name()
     return con.execute(
         f"""
-        SELECT sketch2_bitset_filter(id)
+        SELECT sketch2_bitset_filter(id, ?)
         FROM metadata
         WHERE {predicate_sql}
-        """
+        """,
+        [filter_name],
     ).fetchone()[0]
 
 
@@ -96,7 +104,7 @@ def test_duckdb_staged_write_then_knn(tmp_path, duckdb_con):
         api.write_vector(30, "10.0, 10.0, 10.0, 10.0")
         api.complete_writing()
 
-    assert duckdb_con.execute("SELECT * FROM sketch2_open(?, ?)", [str(dataset_root), dataset_name]).fetchall() == [(True,)]
+    duckdb_con.execute("PRAGMA sketch2_open(?, ?)", [str(dataset_root), dataset_name])
     rows = duckdb_con.execute(
         "SELECT id, score FROM sketch2_knn(?, ?, NULL) ORDER BY score DESC",
         ["1.0, 1.0, 1.0, 1.0", 2],
@@ -119,7 +127,7 @@ def test_duckdb_staged_delete_updates_knn_visibility(tmp_path, duckdb_con):
         api.write_deleted(10)
         api.complete_writing()
 
-    duckdb_con.execute("SELECT * FROM sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    duckdb_con.execute("PRAGMA sketch2_open(?, ?)", [str(dataset_root), dataset_name])
     rows = duckdb_con.execute(
         "SELECT id FROM sketch2_knn(?, ?, NULL) ORDER BY score DESC",
         ["0.0, 0.0, 0.0, 0.0", 1],
@@ -141,7 +149,7 @@ def test_duckdb_staged_abort_discards_session_and_allows_restart(tmp_path, duckd
         api.write_vector(20, "5.0, 5.0, 5.0, 5.0")
         api.complete_writing()
 
-    duckdb_con.execute("SELECT * FROM sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    duckdb_con.execute("PRAGMA sketch2_open(?, ?)", [str(dataset_root), dataset_name])
     rows = duckdb_con.execute(
         "SELECT id FROM sketch2_knn(?, ?, NULL) ORDER BY score DESC",
         ["5.0, 5.0, 5.0, 5.0", 1],
@@ -155,7 +163,7 @@ def test_duckdb_knn_basic_query(tmp_path, duckdb_con):
     dataset_name = "items"
     create_sequential_dataset(dataset_root, dataset_name)
 
-    duckdb_con.execute("SELECT * FROM sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    duckdb_con.execute("PRAGMA sketch2_open(?, ?)", [str(dataset_root), dataset_name])
     query_value = 7.4
     k = 5
     actual = duckdb_con.execute(
@@ -172,7 +180,7 @@ def test_duckdb_knn_float_array_query(tmp_path, duckdb_con):
     dataset_name = "items"
     create_sequential_dataset(dataset_root, dataset_name)
 
-    duckdb_con.execute("SELECT * FROM sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    duckdb_con.execute("PRAGMA sketch2_open(?, ?)", [str(dataset_root), dataset_name])
     query_value = 7.4
     k = 5
     actual = duckdb_con.execute(
@@ -189,15 +197,15 @@ def test_duckdb_knn_float_array_query_with_allowed_ids(tmp_path, duckdb_con):
     dataset_name = "items"
     create_sequential_dataset(dataset_root, dataset_name)
 
-    duckdb_con.execute("SELECT * FROM sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    duckdb_con.execute("PRAGMA sketch2_open(?, ?)", [str(dataset_root), dataset_name])
     load_metadata_table(duckdb_con, tmp_path)
     query_value = 7.4
     k = 6
     allowed_ids = {item_id for item_id in range(START_ID, START_ID + COUNT) if item_id % 2 == 1}
-    filter_ref = bitset_filter_ref_for_predicate(duckdb_con, "aaa = 1")
+    filter_name = bitset_filter_name_for_predicate(duckdb_con, "aaa = 1")
     actual = duckdb_con.execute(
         "SELECT id, score FROM sketch2_knn(?, ?, ?) ORDER BY score, id",
-        [[query_value] * DIM, k, filter_ref],
+        [[query_value] * DIM, k, filter_name],
     ).fetchall()
     expected = expected_knn_rows(query_value, k, allowed_ids=allowed_ids)
     assert_knn_rows_equal(actual, expected)
@@ -209,19 +217,20 @@ def test_duckdb_knn_allowed_ids_can_be_unsorted(tmp_path, duckdb_con):
     dataset_name = "items"
     create_sequential_dataset(dataset_root, dataset_name)
 
-    duckdb_con.execute("SELECT * FROM sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    duckdb_con.execute("PRAGMA sketch2_open(?, ?)", [str(dataset_root), dataset_name])
     query_value = 7.4
     k = 4
     allowed_ids = {1, 5, 7, 9, 13}
-    filter_ref = duckdb_con.execute(
+    filter_name = duckdb_con.execute(
         """
-        SELECT sketch2_bitset_filter(id)
+        SELECT sketch2_bitset_filter(id, ?)
         FROM (VALUES (13), (1), (9), (5), (7)) AS t(id)
-        """
+        """,
+        [next_filter_name("unsorted_filter")],
     ).fetchone()[0]
     actual = duckdb_con.execute(
         "SELECT id, score FROM sketch2_knn(?, ?, ?) ORDER BY score, id",
-        [[query_value] * DIM, k, filter_ref],
+        [[query_value] * DIM, k, filter_name],
     ).fetchall()
     expected = expected_knn_rows(query_value, k, allowed_ids=allowed_ids)
     assert_knn_rows_equal(actual, expected)
@@ -235,7 +244,7 @@ def test_duckdb_knn_empty_dataset_returns_no_rows(tmp_path, duckdb_con):
     with Sketch2Api(dataset_root) as api:
         api.create_dataset(dataset_name, [], dim=DIM, type_name="f32", range_size=1000, dist_func="l2")
 
-    duckdb_con.execute("SELECT * FROM sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    duckdb_con.execute("PRAGMA sketch2_open(?, ?)", [str(dataset_root), dataset_name])
     rows = duckdb_con.execute(
         "SELECT id, score FROM sketch2_knn(?, ?, NULL)",
         [query_vector(7.4), 5],
@@ -249,7 +258,7 @@ def test_duckdb_join_knn_results_with_metadata(tmp_path, duckdb_con):
     dataset_name = "items"
     create_sequential_dataset(dataset_root, dataset_name)
 
-    duckdb_con.execute("SELECT * FROM sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    duckdb_con.execute("PRAGMA sketch2_open(?, ?)", [str(dataset_root), dataset_name])
     load_metadata_table(duckdb_con, tmp_path)
     query_value = 7.4
     k = 4
@@ -272,7 +281,7 @@ def test_duckdb_join_with_metadata_filters_after_knn(tmp_path, duckdb_con):
     dataset_name = "items"
     create_sequential_dataset(dataset_root, dataset_name)
 
-    duckdb_con.execute("SELECT * FROM sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    duckdb_con.execute("PRAGMA sketch2_open(?, ?)", [str(dataset_root), dataset_name])
     load_metadata_table(duckdb_con, tmp_path)
     query_value = 7.4
     k = 6
@@ -297,18 +306,18 @@ def test_duckdb_pushdown_allowed_ids_from_metadata_subquery(tmp_path, duckdb_con
     dataset_name = "items"
     create_sequential_dataset(dataset_root, dataset_name)
 
-    duckdb_con.execute("SELECT * FROM sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    duckdb_con.execute("PRAGMA sketch2_open(?, ?)", [str(dataset_root), dataset_name])
     load_metadata_table(duckdb_con, tmp_path)
     query_value = 7.4
     k = 6
-    filter_ref = bitset_filter_ref_for_predicate(duckdb_con, "aaa = 1")
+    filter_name = bitset_filter_name_for_predicate(duckdb_con, "aaa = 1")
     actual = duckdb_con.execute(
         """
         SELECT n.id, n.score
         FROM sketch2_knn(?, ?, ?) AS n
         ORDER BY n.score, n.id
         """,
-        [query_vector(query_value), k, filter_ref],
+        [query_vector(query_value), k, filter_name],
     ).fetchall()
     allowed_ids = {item_id for item_id in range(START_ID, START_ID + COUNT) if item_id % 2 == 1}
     expected = expected_knn_rows(query_value, k, allowed_ids=allowed_ids)
@@ -321,7 +330,7 @@ def test_duckdb_pushdown_with_different_metadata_predicates(tmp_path, duckdb_con
     dataset_name = "items"
     create_sequential_dataset(dataset_root, dataset_name)
 
-    duckdb_con.execute("SELECT * FROM sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    duckdb_con.execute("PRAGMA sketch2_open(?, ?)", [str(dataset_root), dataset_name])
     load_metadata_table(duckdb_con, tmp_path)
     query_value = 12.35
     k = 4
@@ -330,14 +339,14 @@ def test_duckdb_pushdown_with_different_metadata_predicates(tmp_path, duckdb_con
         ("ccc_between_2_6", "ccc BETWEEN 2 AND 6", {item_id for item_id in range(START_ID, START_ID + COUNT) if 2 <= (item_id % 10) <= 6}),
     ]
     for _, predicate_sql, allowed_ids in cases:
-        filter_ref = bitset_filter_ref_for_predicate(duckdb_con, predicate_sql)
+        filter_name = bitset_filter_name_for_predicate(duckdb_con, predicate_sql, name=next_filter_name("case_filter"))
         actual = duckdb_con.execute(
             """
             SELECT n.id, n.score
             FROM sketch2_knn(?, ?, ?) AS n
             ORDER BY n.score, n.id
             """,
-            [query_vector(query_value), k, filter_ref],
+            [query_vector(query_value), k, filter_name],
         ).fetchall()
         expected = expected_knn_rows(query_value, k, allowed_ids=allowed_ids)
         assert_knn_rows_equal(actual, expected)
@@ -349,12 +358,12 @@ def test_duckdb_pushdown_and_join_return_metadata_columns(tmp_path, duckdb_con):
     dataset_name = "items"
     create_sequential_dataset(dataset_root, dataset_name)
 
-    duckdb_con.execute("SELECT * FROM sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    duckdb_con.execute("PRAGMA sketch2_open(?, ?)", [str(dataset_root), dataset_name])
     load_metadata_table(duckdb_con, tmp_path)
     query_value = 12.35
     k = 4
     allowed_ids = {item_id for item_id in range(START_ID, START_ID + COUNT) if item_id % 5 in (1, 3)}
-    filter_ref = bitset_filter_ref_for_predicate(duckdb_con, "bbb IN (1, 3)")
+    filter_name = bitset_filter_name_for_predicate(duckdb_con, "bbb IN (1, 3)")
     actual = duckdb_con.execute(
         """
         SELECT n.id, n.score, m.aaa, m.bbb, m.ccc, m.text
@@ -362,7 +371,7 @@ def test_duckdb_pushdown_and_join_return_metadata_columns(tmp_path, duckdb_con):
         JOIN metadata AS m ON m.id = n.id
         ORDER BY n.score, n.id
         """,
-        [query_vector(query_value), k, filter_ref],
+        [query_vector(query_value), k, filter_name],
     ).fetchall()
     expected_ids = [item_id for item_id, _ in expected_knn_rows(query_value, k, allowed_ids=allowed_ids)]
     assert_join_rows_match_ids(actual, expected_ids, query_value)
@@ -374,7 +383,7 @@ def test_duckdb_pushdown_changes_neighbor_set_vs_postfilter(tmp_path, duckdb_con
     dataset_name = "items"
     create_sequential_dataset(dataset_root, dataset_name)
 
-    duckdb_con.execute("SELECT * FROM sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    duckdb_con.execute("PRAGMA sketch2_open(?, ?)", [str(dataset_root), dataset_name])
     load_metadata_table(duckdb_con, tmp_path)
     query_value = 7.4
     k = 6
@@ -390,15 +399,56 @@ def test_duckdb_pushdown_changes_neighbor_set_vs_postfilter(tmp_path, duckdb_con
         [query_vector(query_value), k],
     ).fetchall()
 
-    filter_ref = bitset_filter_ref_for_predicate(duckdb_con, "aaa = 1")
+    filter_name = bitset_filter_name_for_predicate(duckdb_con, "aaa = 1")
     pushed_down = duckdb_con.execute(
         """
         SELECT n.id
         FROM sketch2_knn(?, ?, ?) AS n
         ORDER BY n.score, n.id
         """,
-        [query_vector(query_value), k, filter_ref],
+        [query_vector(query_value), k, filter_name],
     ).fetchall()
 
     assert [row[0] for row in post_filtered] == [7, 9, 5]
     assert [row[0] for row in pushed_down] == [7, 9, 5, 11, 3, 13]
+
+
+def test_duckdb_named_filter_can_be_reused_across_queries(tmp_path, duckdb_con):
+    dataset_root = tmp_path / "db"
+    dataset_root.mkdir()
+    dataset_name = "items"
+    create_sequential_dataset(dataset_root, dataset_name)
+
+    duckdb_con.execute("PRAGMA sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    load_metadata_table(duckdb_con, tmp_path)
+    query_value = 7.4
+    k = 6
+    allowed_ids = {item_id for item_id in range(START_ID, START_ID + COUNT) if item_id % 2 == 1}
+    filter_name = bitset_filter_name_for_predicate(duckdb_con, "aaa = 1", name=next_filter_name("reusable_filter"))
+
+    first = duckdb_con.execute(
+        "SELECT id, score FROM sketch2_knn(?, ?, ?) ORDER BY score, id",
+        [query_vector(query_value), k, filter_name],
+    ).fetchall()
+    second = duckdb_con.execute(
+        "SELECT id, score FROM sketch2_knn(?, ?, ?) ORDER BY score, id",
+        [[query_value] * DIM, k, filter_name],
+    ).fetchall()
+    expected = expected_knn_rows(query_value, k, allowed_ids=allowed_ids)
+
+    assert_knn_rows_equal(first, expected)
+    assert_knn_rows_equal(second, expected)
+
+
+def test_duckdb_bitset_drop_removes_named_filter(tmp_path, duckdb_con):
+    dataset_root = tmp_path / "db"
+    dataset_root.mkdir()
+    dataset_name = "items"
+    create_sequential_dataset(dataset_root, dataset_name)
+
+    duckdb_con.execute("PRAGMA sketch2_open(?, ?)", [str(dataset_root), dataset_name])
+    load_metadata_table(duckdb_con, tmp_path)
+    filter_name = bitset_filter_name_for_predicate(duckdb_con, "aaa = 1", name=next_filter_name("drop_filter"))
+
+    assert duckdb_con.execute("SELECT sketch2_bitset_drop(?)", [filter_name]).fetchall() == [(1,)]
+    assert duckdb_con.execute("SELECT sketch2_bitset_drop(?)", [filter_name]).fetchall() == [(0,)]

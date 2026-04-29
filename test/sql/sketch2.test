@@ -4,37 +4,37 @@
 
 # Before we load the extension, this will fail
 statement error
-SELECT sketch2('Sam');
+SELECT sketch2_version();
 ----
-Catalog Error: Scalar Function with name sketch2 does not exist!
+Catalog Error: Scalar Function with name sketch2_version does not exist!
 
 # Require statement will ensure this test is run with this extension loaded
 require sketch2
 
 # Confirm the extension works
 query T
-SELECT sketch2('');
+SELECT sketch2_version();
 ----
 0.1.0
 
 statement error
-CALL sketch2_open('/tmp/db', 'demo');
+PRAGMA sketch2_open('/tmp/db', 'demo');
 ----
 
-query I
-SELECT sketch2_bitset_filter(id) > 0
+query T
+SELECT sketch2_bitset_filter(id, 'sql_test_filter')
 FROM (SELECT 1::BIGINT AS id UNION ALL SELECT 3::BIGINT UNION ALL SELECT 9::BIGINT) t;
 ----
-true
+sql_test_filter
 
 query I
-SELECT sketch2_bitset_filter(id) > 0
+SELECT sketch2_bitset_filter(id, 'empty_sql_test_filter') IS NULL
 FROM (SELECT * FROM range(0)) t(id);
 ----
 true
 
 statement error
-SELECT sketch2_bitset_filter(-1::BIGINT);
+SELECT sketch2_bitset_filter(-1::BIGINT, 'bad_filter');
 ----
 
 statement error
@@ -52,18 +52,18 @@ SELECT * FROM sketch2_knn('1.0, 1.0, 1.0, 1.0', 1, 0);
 statement error
 SELECT * FROM sketch2_knn('1.0, 1.0, 1.0, 1.0', 1, NULL);
 ----
-<REGEX>:.*sketch2_knn requires sketch2_open\(database_path, dataset_name\) to be called first.*
+<REGEX>:.*sketch2_knn requires PRAGMA sketch2_open\(database_path, dataset_name\) to be called first.*
 
 statement error
-CALL sketch2_open('/tmp/db');
+PRAGMA sketch2_open('/tmp/db');
 ----
 
 statement error
-CALL sketch2_open(NULL, 'demo');
+PRAGMA sketch2_open(NULL, 'demo');
 ----
 
 statement ok
-CALL sketch2_open('test/generated/sketch2_sql_fixture', 'items');
+PRAGMA sketch2_open('test/generated/sketch2_sql_fixture', 'items');
 
 query TT
 SELECT id, score > 0
@@ -75,6 +75,55 @@ FROM sketch2_knn(
 ----
 30	true
 20	true
+
+query T
+SELECT sketch2_bitset_filter(id, 'sql_books_filter')
+FROM (SELECT 1::BIGINT AS id UNION ALL SELECT 3::BIGINT UNION ALL SELECT 9::BIGINT) t;
+----
+sql_books_filter
+
+query I
+SELECT sketch2_bitset_drop('sql_books_filter');
+----
+1
+
+query T
+SELECT sketch2_bitset_filter(id, 'sql_reuse_filter')
+FROM (SELECT 10::BIGINT AS id UNION ALL SELECT 20::BIGINT UNION ALL SELECT 30::BIGINT) t;
+----
+sql_reuse_filter
+
+query TT
+SELECT id, score > 0
+FROM sketch2_knn(
+    [1.0, 1.0, 1.0, 1.0]::FLOAT[],
+    2,
+    'sql_reuse_filter'
+) ORDER BY score DESC, id DESC;
+----
+30	true
+20	true
+
+query TT
+SELECT id, score > 0
+FROM sketch2_knn(
+    [1.0, 1.0, 1.0, 1.0]::FLOAT[],
+    2,
+    'sql_reuse_filter'
+) ORDER BY score DESC, id DESC;
+----
+30	true
+20	true
+
+query I
+SELECT sketch2_bitset_drop('sql_reuse_filter');
+----
+1
+
+query I
+SELECT sketch2_bitset_drop('sql_reuse_filter');
+----
+0
 
 query TT
 SELECT id, score > 0

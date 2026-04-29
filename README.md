@@ -14,7 +14,7 @@ Sketch2-specific extension with:
 
 - session-scoped dataset opening
 - KNN search from DuckDB
-- allow-list pushdown through `sketch2_bitset_filter`
+- named allow-list pushdown through `sketch2_bitset_filter`
 - query vectors accepted as Sketch2 text or DuckDB float arrays
 
 ## Why This Extension Exists
@@ -43,15 +43,26 @@ exists and exposes the read/query path inside DuckDB.
 
 The current SQL surface is:
 
-- `sketch2(arg)`:
-  simple helper for extension information such as Sketch2 version or the
-  currently opened dataset name
-- `sketch2_open(database_path, dataset_name)`:
+- `sketch2_version()`:
+  returns the Sketch2 library version
+- `sketch2_dataset()`:
+  returns the currently opened dataset name for the current connection
+- `PRAGMA sketch2_open(database_path, dataset_name)`:
   opens a Sketch2 dataset for the current DuckDB connection
-- `sketch2_knn(query_vector, k, bitset_filter_ref)`:
+- `PRAGMA sketch2_close`:
+  closes the currently opened Sketch2 dataset for the current DuckDB connection
+- `sketch2_knn(query_vector, k, bitset_filter_name)`:
   returns top-k nearest neighbors as `(id, score)`
-- `sketch2_bitset_filter(id)`:
-  aggregate that turns a DuckDB result set of ids into a Sketch2 allow-list
+- `sketch2_bitset_filter(id, name)`:
+  aggregate that turns a DuckDB result set of ids into a named Sketch2 allow-list
+- `sketch2_bitset_load(name)`:
+  validates a named Sketch2 allow-list
+- `sketch2_bitset_drop(name)`:
+  removes a named Sketch2 allow-list
+- `sketch2_bitset_cache_remove(name)`:
+  removes one named bitset filter from Sketch2's in-process cache
+- `sketch2_bitset_cache_clear()`:
+  clears Sketch2's in-process bitset filter cache
 
 ## How It Works
 
@@ -65,17 +76,20 @@ already uses for SQLite:
    opened dataset belongs to the current DuckDB connection.
 4. `sketch2_knn` calls into the Sketch2 C API and returns rows back to DuckDB
    as a table function.
-5. `sketch2_bitset_filter` builds a compact Sketch2 bitset blob from ids produced by a
-   DuckDB query, stores it in connection-local state, and returns a small
-   integer handle that `sketch2_knn` can use.
+5. `sketch2_bitset_filter` builds a named Sketch2 bitset filter from ids
+   produced by a DuckDB query. Sketch2 owns the persisted filter, and
+   `sketch2_knn` later loads it by name.
 
 Important behavioral details:
 
 - one DuckDB connection tracks one active opened Sketch2 dataset at a time
 - opening a new dataset replaces the previous handle in that connection
-- bitset filter references are connection-local and ephemeral
-- the current implementation keeps only the most recently built bitset in a
-  connection, so build the filter immediately before using it
+- bitset filters are named and owned by Sketch2
+- named filters can be reused across DuckDB queries
+- `sketch2_bitset_load(name)` validates a named filter explicitly
+- `sketch2_bitset_drop(name)` removes a named filter when it is no longer needed
+- `sketch2_bitset_cache_remove(name)` evicts one named filter from Sketch2's cache
+- `sketch2_bitset_cache_clear()` evicts all named filters from Sketch2's cache
 - this extension is read/query oriented; dataset creation and mutation still
   happen through Sketch2 itself
 
@@ -139,41 +153,56 @@ The extension queries an existing Sketch2 dataset. In Sketch2 terminology:
 
 ## SQL API Reference
 
-### `sketch2(arg)`
+### `sketch2_version()`
 
-Scalar helper function.
+Scalar function that returns the Sketch2 library version.
 
-Supported values:
-
-- `''` or `'version'`: returns Sketch2 library version
-- `'dataset'`: returns the currently opened dataset name
-
-Examples:
+Example:
 
 ```sql
-SELECT sketch2('');
-SELECT sketch2('version');
-SELECT sketch2('dataset');
+SELECT sketch2_version();
 ```
 
-### `sketch2_open(database_path, dataset_name)`
+### `sketch2_dataset()`
 
-Table function that opens a Sketch2 dataset for the current DuckDB connection
-and returns one row with `true` on success.
+Scalar function that returns the currently opened dataset name.
 
-Use it as a table function, not as `CALL`.
+Errors:
+
+- raises an error if no dataset is open on the current connection
+
+Example:
 
 ```sql
-SELECT * FROM sketch2_open('/mnt/nvme/sketch2/db', 'items');
+SELECT sketch2_dataset();
+```
+
+### `PRAGMA sketch2_open(database_path, dataset_name)`
+
+PRAGMA that opens a Sketch2 dataset for the current DuckDB connection.
+
+```sql
+PRAGMA sketch2_open('/mnt/nvme/sketch2/db', 'items');
 ```
 
 Notes:
 
 - arguments must be non-`NULL`
 - the dataset must already exist
-- `sketch2_knn` requires `sketch2_open(...)` to be called first
+- `sketch2_knn` requires `PRAGMA sketch2_open(...)` to be called first
 
-### `sketch2_knn(query_vector, k, bitset_filter_ref)`
+### `PRAGMA sketch2_close`
+
+PRAGMA that closes the currently opened Sketch2 dataset for the current
+DuckDB connection. If no dataset is open, this is a no-op.
+
+Example:
+
+```sql
+PRAGMA sketch2_close;
+```
+
+### `sketch2_knn(query_vector, k, bitset_filter_name)`
 
 Table function that returns nearest neighbors with schema:
 
@@ -184,9 +213,9 @@ Table function that returns nearest neighbors with schema:
 Arguments:
 
 - `query_vector`: the query vector
-- `k`: number of neighbors to return, must be `> 0`
-- `bitset_filter_ref`: optional handle returned by `sketch2_bitset_filter(id)`;
-  pass `NULL` for no filter
+- `k`: number of neighbors to return, must be `> 0` and `<= 1,000,000`
+- `bitset_filter_name`: optional name of a filter created by
+  `sketch2_bitset_filter(id, name)`; pass `NULL` for no filter
 
 Supported query-vector formats:
 
@@ -207,6 +236,9 @@ FROM sketch2_knn('1.0, 2.0, 3.0, 4.0', 5, NULL);
 
 SELECT *
 FROM sketch2_knn([1.0, 2.0, 3.0, 4.0]::FLOAT[], 5, NULL);
+
+SELECT *
+FROM sketch2_knn([1.0, 2.0, 3.0, 4.0]::FLOAT[], 5, 'books_filter');
 ```
 
 Score ordering depends on the Sketch2 dataset metric:
@@ -214,40 +246,107 @@ Score ordering depends on the Sketch2 dataset metric:
 - for `l2` and `cos`, smaller scores are better, so use `ORDER BY score ASC`
 - for `dot`, larger scores are better, so use `ORDER BY score DESC`
 
-### `sketch2_bitset_filter(id)`
+### `sketch2_bitset_filter(id, name)`
 
-Aggregate function that turns a set of ids into a Sketch2 allow-list and
-returns a positive integer reference.
+Aggregate function that turns a set of ids into a named Sketch2 allow-list and
+echoes the provided filter name on success.
 
 Requirements and limits:
 
 - input ids must be non-negative `BIGINT`
-- `NULL` inputs are ignored
-- maximum supported count is `1000000` ids
-- the returned reference is only valid in the current DuckDB connection
-- building a new bitset replaces the previous one in that connection
+- `name` must be a constant, non-`NULL`, non-empty `VARCHAR`
+- rows with `NULL` ids are ignored
+- at most 1,000,000 ids are allowed per aggregate group
+- the named filter is persisted by Sketch2 and can be reused by later queries
 
 Example:
 
 ```sql
-SELECT sketch2_bitset_filter(id)
+SELECT sketch2_bitset_filter(id, 'books_filter')
 FROM metadata
 WHERE category = 'books';
 ```
 
-Unlike Sketch2's SQLite integration, DuckDB does not require ids passed to
-`sketch2_bitset_filter(id)` to be pre-sorted. The aggregate sorts internally before it
-builds the Sketch2 allow-list blob.
+DuckDB does not require ids passed to `sketch2_bitset_filter(id, name)` to be
+pre-sorted. The aggregate collects ids during execution and hands them to
+Sketch2's builder at finalize time, and Sketch2 owns the resulting named
+filter.
+
+### `sketch2_bitset_load(name)`
+
+Scalar function that validates a named Sketch2 allow-list. `sketch2_knn(...,
+bitset_filter_name)` can load filters lazily by name, so this function is mainly
+useful as an explicit preflight step.
+
+Arguments:
+
+- `name`: constant, non-`NULL`, non-empty name of the filter to load
+
+Returns the filter name on success. Missing, invalid, or malformed filters raise
+a DuckDB error.
+
+Example:
+
+```sql
+SELECT sketch2_bitset_load('books_filter');
+```
+
+### `sketch2_bitset_drop(name)`
+
+Scalar function that removes a named Sketch2 allow-list.
+
+Arguments:
+
+- `name`: constant, non-`NULL`, non-empty name of the filter to remove
+
+Returns `1` when a filter file was removed and `0` when there was no matching
+filter.
+
+Example:
+
+```sql
+SELECT sketch2_bitset_drop('books_filter');
+```
+
+### `sketch2_bitset_cache_remove(name)`
+
+Scalar function that evicts one named Sketch2 allow-list from Sketch2's
+in-process cache. The on-disk filter file is not removed.
+
+Arguments:
+
+- `name`: constant, non-`NULL`, non-empty name of the cached filter to remove
+
+Returns `1` when a cache entry was removed and `0` when there was no matching
+cached entry.
+
+Example:
+
+```sql
+SELECT sketch2_bitset_cache_remove('books_filter');
+```
+
+### `sketch2_bitset_cache_clear()`
+
+Scalar function that clears Sketch2's in-process bitset-filter cache.
+
+Returns `true` on success.
+
+Example:
+
+```sql
+SELECT sketch2_bitset_cache_clear();
+```
 
 ## Query Examples
 
 ### 1. Open a dataset and inspect state
 
 ```sql
-SELECT * FROM sketch2_open('/mnt/nvme/sketch2/db', 'items');
+PRAGMA sketch2_open('/mnt/nvme/sketch2/db', 'items');
 
-SELECT sketch2('version') AS sketch2_version;
-SELECT sketch2('dataset') AS opened_dataset;
+SELECT sketch2_version() AS sketch2_version;
+SELECT sketch2_dataset() AS opened_dataset;
 ```
 
 ### 2. Basic KNN query for an `l2` or `cos` dataset
@@ -298,16 +397,15 @@ while DuckDB handles metadata joins and the rest of the SQL pipeline.
 
 ### 5. Push a metadata-derived allow-list into Sketch2
 
-In the current DuckDB extension implementation this is typically a two-step
-workflow:
+The name-based filter workflow is:
 
-1. build a filter reference from DuckDB rows
-2. pass that returned handle into `sketch2_knn`
+1. build a named filter from DuckDB rows
+2. pass that filter name into `sketch2_knn`
 
 Step 1:
 
 ```sql
-SELECT sketch2_bitset_filter(id) AS filter_ref
+SELECT sketch2_bitset_filter(id, 'books_filter') AS filter_name
 FROM metadata
 WHERE category = 'books';
 ```
@@ -316,13 +414,12 @@ Step 2:
 
 ```sql
 SELECT n.id, n.score, m.title
-FROM sketch2_knn([7.4, 7.4, 7.4, 7.4]::FLOAT[], 5, ?) AS n
+FROM sketch2_knn([7.4, 7.4, 7.4, 7.4]::FLOAT[], 5, 'books_filter') AS n
 JOIN metadata AS m ON m.id = n.id
 ORDER BY n.score, n.id;
 ```
 
-Pass the `filter_ref` value from step 1 as the third argument from your client
-code. For example, from Python:
+For example, from Python:
 
 ```python
 import duckdb
@@ -331,14 +428,15 @@ con = duckdb.connect(":memory:", config={"allow_unsigned_extensions": "true"})
 con.execute(
     "LOAD '/absolute/path/to/build/release/extension/sketch2/sketch2.duckdb_extension'"
 )
-con.execute("SELECT * FROM sketch2_open(?, ?)", ["/mnt/nvme/sketch2/db", "items"])
+con.execute("PRAGMA sketch2_open(?, ?)", ["/mnt/nvme/sketch2/db", "items"])
 
-filter_ref = con.execute(
+filter_name = con.execute(
     """
-    SELECT sketch2_bitset_filter(id)
+    SELECT sketch2_bitset_filter(id, ?)
     FROM metadata
     WHERE category = 'books'
-    """
+    """,
+    ["books_filter"],
 ).fetchone()[0]
 
 rows = con.execute(
@@ -348,12 +446,18 @@ rows = con.execute(
     JOIN metadata AS m ON m.id = n.id
     ORDER BY n.score, n.id
     """,
-    [[7.4, 7.4, 7.4, 7.4], 5, filter_ref],
+    [[7.4, 7.4, 7.4, 7.4], 5, filter_name],
 ).fetchall()
 ```
 
 This pattern is useful when DuckDB can cheaply derive a candidate id set from
 relational predicates and Sketch2 should search only within that subset.
+
+Named filters can be dropped when they are no longer needed:
+
+```sql
+SELECT sketch2_bitset_drop('books_filter');
+```
 
 ## What This Extension Does Not Do
 

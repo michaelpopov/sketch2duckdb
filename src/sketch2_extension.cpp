@@ -1,6 +1,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "sketch2_bitset_filter.hpp"
+#include "sketch2_close.hpp"
 #include "sketch2_extension.hpp"
 #include "sketch2_knn.hpp"
 #include "sketch2_open.hpp"
@@ -8,43 +9,44 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 
 #include "sketch2_dataset.hpp"
 #include "sketch2.h"
 
 namespace duckdb {
 
-inline string_t get_sketch2_info(ClientContext &context, string_t arg) {
-	auto dataset = GetSketch2Dataset(context);
-
-	if (arg.Empty() || arg == "version") {
-		memset(dataset->version, 0, sizeof(dataset->version));
-		sk_version(dataset->version, sizeof(dataset->version));
-		return dataset->version;
-	}
-
-	if (arg == "dataset") {
-		return dataset->dataset_name;
-	}
-
-	return "Unknown request";
+inline std::string GetSketch2Version() {
+	char version[64] = {};
+	sk_version(version, sizeof(version));
+	return std::string(version);
 }
 
-inline void Sketch2ScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &arg_vector = args.data[0];
-	auto &context = state.GetContext();
-	UnaryExecutor::Execute<string_t, string_t>(arg_vector, result, args.size(), [&](string_t arg) {
-		const auto value = get_sketch2_info(context, arg);
-		return StringVector::AddString(result, value);
-	});
+inline std::string GetSketch2DatasetName(ClientContext &context) {
+	auto dataset = GetSketch2Dataset(context);
+	std::lock_guard<std::mutex> lock(dataset->mutex);
+	if (!dataset->handle) {
+		throw InvalidInputException("sketch2_dataset(): no dataset is open on this connection");
+	}
+	return dataset->dataset_name;
+}
+
+inline void Sketch2VersionScalarFun(DataChunk &args, ExpressionState &, Vector &result) {
+	D_ASSERT(args.size() == 1);
+	result.SetValue(0, Value(GetSketch2Version()));
+}
+
+inline void Sketch2DatasetScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
+	D_ASSERT(args.size() == 1);
+	result.SetValue(0, Value(GetSketch2DatasetName(state.GetContext())));
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
-	// Register a scalar function
-	auto sketch2_scalar_function = ScalarFunction("sketch2", {LogicalType::VARCHAR}, LogicalType::VARCHAR, Sketch2ScalarFun);
-	loader.RegisterFunction(sketch2_scalar_function);
+	auto sketch2_version_function = ScalarFunction("sketch2_version", {}, LogicalType::VARCHAR, Sketch2VersionScalarFun);
+	loader.RegisterFunction(sketch2_version_function);
+	auto sketch2_dataset_function = ScalarFunction("sketch2_dataset", {}, LogicalType::VARCHAR, Sketch2DatasetScalarFun);
+	loader.RegisterFunction(sketch2_dataset_function);
 	RegisterSketch2BitsetFilterFunction(loader);
+	RegisterSketch2CloseFunction(loader);
 	RegisterSketch2KnnFunction(loader);
 	RegisterSketch2OpenFunction(loader);
 }
