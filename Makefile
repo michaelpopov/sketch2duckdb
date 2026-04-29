@@ -12,7 +12,7 @@ EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 # Include the Makefile from extension-ci-tools
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
-.PHONY: python-test-deps pytest generate-sql-fixture
+.PHONY: python-test-deps pytest generate-sql-fixture tut
 
 $(PYTEST_PYTHON):
 	python3 -m venv $(PYTEST_VENV)
@@ -42,6 +42,9 @@ $(SQL_FIXTURE_STAMP):
 	@touch $(SQL_FIXTURE_STAMP)
 
 generate-sql-fixture: $(SQL_FIXTURE_STAMP)
+
+tut: test $(PYTEST_STAMP)
+	$(PYTEST_PYTHON) tutorial/run_all.py
 
 test_release_internal: $(SQL_FIXTURE_STAMP)
 test_debug_internal: $(SQL_FIXTURE_STAMP)
